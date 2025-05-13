@@ -1,0 +1,210 @@
+---
+title: "GSE252168 Exploration"
+author: "John Thompson"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE,warn=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Biobase)
+library(GEOquery)
+library(fs)
+
+home = "C:/Projects/RDevelopment/MLforGE/microarray_benchmark"
+
+df <- readRDS(path(home, "temp/GSE252168_df.rds"))
+df <- log2(df)
+features <- readRDS(path(home, "temp/features_df.rds") )
+df$y <- factor(features[["status:ch1"]])
+df$sex <- factor(features[["gender:ch1"]])
+df$biobank <- factor(features[["biobank:ch1"]])
+```
+
+## GSE252168
+
+GSE252168 is a study in the Gene Expression Omnibus (GEO) entitled "Robust messenger RNA (mRNA) markers in blood for lung cancer diagnosis".
+In the authors' own words, "We sampled blood from 123 LC patients at the St. Olavs university hospital, and 180 controls from two different biobanks sampled on two different blood tubes (PAXgene and Tempus) and used Illumina (HT-12 v4) microarrays to measure whole blood gene expression. We did three analyses: (i) finding relevant gene expression differences between cases and controls, (ii) finding a robust set of genes to be used as a panel to identify presence of LC in blood, and (iii) identifying differences between patients with different pathological traits such as stage and histology. We collected phenotype data from questionnaires and hospital medical records, and evaluated the potential effects of CRP, tumour size, gender, and smoking habits."
+
+The series matrix was downloaded using the `GEOquery` package and the normalised expression data on 30716 RNAs was extracted using the `Biobase` package and it was log2 transformed.
+
+## Lung Cancer vs controls
+
+Each of the 30,716 sets of expression levels was used separately in a Welsh t-test to compare lung cancer patients with controls. The plot shows the observed and expected p-values under the assumption of no difference between the two groups.
+
+```{r echo=FALSE}
+p <- rep(0, 30715)
+for(i in 1:30715) {
+  p[i] <- t.test(df[, i] ~ df$y)$p.value
+}
+p <- -log10(sort(p))
+q <- -log10( (1:30715-0.5)/30715)
+plot(q, p, pch=16, xlab="Expected -log10(p)", ylab="-log10(p)",
+     main="Figure 1: t-test -log10(pvalue)")
+abline(a=0, b=1)
+c <- sum(p>6)
+pct = round(100*c/30715, 1)
+```
+
+This is such a large difference that is it suspicious. A Bonferroni adjusted p-value would be 0.05/30716 or 1.6x10^-6. 
+If there were no difference in expression, we would expect -log10(p) to be between 0 and 6 and yet the observed values are up to 58 and `r c` (`r pct`%) of RNAs have -log10(p) over 6. 
+
+```{r echo=FALSE}
+k <- quantile(p, prob=0.5) / quantile(q, prob=0.5)
+```
+
+Assuming that the least significant 50% of RNAs are not genuinely disease related, then the -log10(p) values are exaggerated by a factor of `r round(k, 2)`. Reducing the observed -log10(p) by this factor the plot becomes
+
+```{r echo=FALSE}
+plot(q, p/k, pch=16, xlab="Expected -log10(p)", ylab="-log10(p)",
+     main="Figure 2: Adjusted -log10(pvalues)")
+abline(a=0, b=1)
+```
+
+The order of the RNAs is unaffected, but the significance is more realistic. The plot below shows the four most significant with the lung cancer cases in red and the controls in blue.
+```{r echo=FALSE}
+pairs(df[, c(13764,14520,21923,28849)], col=c("red","blue")[df$y],
+      main="Figure 3: Case & Control for the Most Significant RNAs")
+```
+
+The overdispersion apparent in the p-values could have arisen for many reasons, but without understanding those reasons it would be dangerous to rely on any association between the expressions levels and disease group.  
+
+## Reasons for the Overdispersion
+
+The most likely reason for the overdispersion is that there is some technical factor influencing the expression measurement, either in the collecting of the samples or in their processing. The project description makes it clear that the control samples came from two different biobanks, so that would be the obvious place to look.
+
+Here is a repeat of the plot of the four most significant expression levels but this time with the controls coloured green and purple to denote the two biobanks.
+
+```{r echo=FALSE}
+pairs(df[, c(13764,14520,21923,28849)], col=c("green","red","purple")[df$biobank], 
+      main="Figure 4: Biobanks for the Most Significant RNAs")
+```
+
+The red lung cancer cases are still distinct, but the controls are clearly not a homogeneous group. The controls from the HUNT biobank in green show very little variation in their expression levels. Perhaps this is a result of the use of different blood tubes to stabilise the RNA, but it could equally well be some other difference in the processing of the samples.
+
+The lung cancers cases (red) and the NOWAC controls (purple) both used PAXgene tubes while the HUNT study (green) used tempus tubes, so we could remove the tubed effect. 
+
+To make matters worse, NOWAC is the Norwegian Women and Health Study; all of the samples are from women, while the cases and controls are mixed.
+```{r ech=FALSE}
+table(df$sex, df$biobank)
+```
+
+Repeating the plot by sex (women=pink, men=brown) gives
+```{r echo=FALSE}
+pairs(df[, c(13764,14520,21923,28849)], col=c("pink","brown")[df$sex],
+      main="Figure 5: Sexes for the Most Significant RNAs")
+```
+
+Again there sexes are distinct and the men are split into two clusters. It is very difficult to disentangle sex differences from biobank differences.  
+
+The strong batch and sex effects makes analysis difficult, not least because any adjustment for the batch difference (HUNT vs NLCB vs NOWAC) will remove much of the case vs control difference (case=NLCB, control=HUNT+NOWAC). 
+
+## Machine Learning is dangerous
+
+Machine Learning emphasises prediction and there is little doubt that it is possible to make very accuracy predictions of disease status from the expression data. Unfortunately, the predictive models are unlikely to generalise beyond this dataset because of the strong batch effects. This makes the ML results of very little value.
+
+As far as benchmarking is concerned, it would be possible to compare different model on these expression levels, but what would it show? 
+
+A more reasonable test would be to renormalise to remove the batch effect and then ask which method best picks up the residual signal. The important question for the benchmarking seems to be **once the impacts of study design have been removed, which ML models best predict disease status**.
+
+The problem with adjusting up front for tube type and sex is that the adjustment will in part be dependent on the test data, which will likely bias the performance measure. In truth, the same could be said of the normalisation that took place before the data were placed in the series matrix file. Since the impact will be similar on all ML models and because the objective is to compare ML models rather measure their accuracy, I am willing to allow this up front adjustment.
+
+To illustrate the importance of this adjustment, here is the same pairs plot shown before as figure 4 but with the expression levels replaced by the residuals after adjustment for sex and tube type.
+
+```{r echo=FALSE}
+df <- readRDS(path(home, "temp/GSE252168_Adjusted_df.rds"))
+df$biobank <- factor(features[["biobank:ch1"]])
+pairs(df[, c(13764,14520,21923,28849)], col=c("green","red","blue")[df$biobank],
+      main="Figure 6: Adjusted data version of figure 4")
+```
+
+## Choice ML Model
+
+The main characteristic of the GSE252168 dataset is that the number of RNAs (30,716) is far greater than the number of study participants (303). Feature selection will form a vital part of modelling process. To allow just 10 participants per RNA that makes it into the model fitting, the number of RNAs will need to be reduced from 30716 down to 30.
+
+Some models such as glmnet and tree-based models incorporate feature selection as part of the fitting algorithm, while others do not. Even those that do incorporate feature selection might struggle with so many RNAs to choose from. If feature selection is used then it is vital that it is seen as part of the model. Performance will relate to the combination of a feature selection method with a model.
+
+## Feature Selection
+
+The emphasis should be on models that could be employed in practice to analyse microarray data. With a sample of 303 participants it is unlikely that the final model will use more than say, 30 RNAs. The set of 30 might not be the 30 that are individually most significant because of correlation between the features, but it is also unlikely that any member of the set of the best 30 will not all show some individual significance. A two stage process might be
+- reduce the features to say, the 100 that are individually most significant  
+- look for a model and a feature set with a maximum of size of 30 that best predicts disease status  
+This algorithm would save a lot of computation time.
+
+When cross-validating it is important to recalculate the values of the filter used to select the top 100, because the members of that set will change depending on the random training data. However, it is unlikely that the top 100 for any given subset of training data will not be in the top, say 250 overall (using all training data). To reduce the computational load er could have a 3 stage process
+- select the top 250 using all training data  
+- select the top 100 from the 250 using the randomly selected training data  
+- fit the model to a maximum to 30 features chosen from the 100  
+
+## Logistic Regression
+
+Using 10 fold cross-validation  
+
+Features   |  CV Accuracy  
+-----------|------------------  
+  5        |     75.5%  
+ 10        |     74.9%  
+ 15        |     73.2%  
+ 20        |     70.7%  
+ 25        |     71.6%  
+ 30        |     70.7%  
+
+
+It appears that concentrating on a small feature set gives better accuracy.
+
+## Single Tree
+
+The number of features will be determined by the depth of the tree.  
+
+cp         |  CV Accuracy  
+---------- | -----------------  
+ 0.01      |     73.9%  
+ 0.01      |     76.2%  
+ 0.01      |     73.9%  
+ 0.05      |     72.6%  
+ 0.1       |     73.6%  
+
+Hardly any better than logistic regression
+
+## XGBoost
+
+eps     | nrounds |  CV Accuracy  
+--------|---------|--------------  
+ 0.1    |  100    |    84.2%  
+ 0.2    |  100    |    86.2%  
+ 0.3    |  100    |    86.5%  
+ 0.4    |  100    |    86.1%  
+--------|---------|--------------  
+ 0.3    |   50    |    83.5%  
+ 0.3    |  200    |    82.1%  
+--------|---------|--------------  
+ 0.3    |  100    |    83.1%  
+ 0.3    |  100    |    82.5%  
+ 0.3    |  100    |    85.1%  
+ 0.3    |  100    |    86.5%  
+ 
+XGBoost out performs the other algorithms. 10-fold CV measures accuracy to within about plus/minus 2%, which makes HPO meaningless.
+
+## Random Forest
+
+mtry   |  ntrees  |  CV Accuracy  
+--------|---------|--------------  
+  50   |  250  |  82.5%  82.9%  82.5%    
+  50   |  500  |  82.5%  80.9%  83.9%    
+  50   | 1000  |  81.9%  82.8%  82.5%    
+  100   |  500  |  83.9%  81.4%  82.4%    
+
+Similar to XGBoost. HPO pointless due to random variation in the CV.
+
+## Other Datasets
+
+GSE252168 used the Illumina HumanHT-12 v4 Expression BeadChip. There are many studies stored in the GEO repository that used this sane chip and which have between 100 and 700 participants. These data would be suitable for the benchmarking and might subsequently be interesting for studying the possibility of borrowing information between studies.
+
+
+# Conclusions
+
+- Reducing the initial dataset to 250 features is sensible  
+- HPO is pointless when the sample size (n=303) is small
+- Logistic Regression, XGBoost and Random Forest should be included  
+- accuracy is quite insensitive as a measure. Perhaps AUC would be better
+- basing the benchmarking on studies that used the same chip feels sensible, but probably makes little difference. Variation in sample size and the relation between sample size and the feature selection are probably more important.  
